@@ -1,0 +1,1 @@
+Reads a specific word (docx) document's xml to extract rows from a table & extract text from a section in the document.
