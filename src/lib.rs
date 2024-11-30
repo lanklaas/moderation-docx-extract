@@ -382,7 +382,7 @@ impl ExtractedInfo {
         ]
     }
 
-    pub fn header_record(&self) -> [&str; 9] {
+    pub fn header_record() -> [&'static str; 9] {
         [
             "Province",
             "District",

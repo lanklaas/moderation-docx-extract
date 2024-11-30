@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use anyhow::bail;
 use anyhow::Result;
+use clap::Parser;
 use csv::WriterBuilder;
 use doc_read::read_header_info;
 use doc_read::read_part_four;
@@ -17,11 +18,21 @@ use doc_read::ExtractedInfo;
 use doc_read::Part4;
 use quick_xml::Reader;
 use tracing::debug;
+use tracing::error;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use walkdir::WalkDir;
 use zip::ZipArchive;
+
+#[derive(clap::Parser)]
+#[clap(about = "Extracts data from word files in a directory")]
+struct Args {
+    #[clap(default_value = "../../data")]
+    data_dir: PathBuf,
+    #[clap(default_value = "/tmp/out.csv")]
+    output_file: PathBuf,
+}
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
@@ -31,19 +42,23 @@ fn main() -> anyhow::Result<()> {
         )
         .with(tracing_subscriber::fmt::layer().with_span_events(FmtSpan::CLOSE))
         .init();
-    let files = collect_doc_xmls(Path::new("../../data/"))?;
+    let Args {
+        data_dir,
+        output_file,
+    } = Args::parse();
+    let files = collect_doc_xmls(&data_dir)?;
     let mut wtr = WriterBuilder::new()
         .has_headers(true)
         .double_quote(true)
-        .from_path("/tmp/out.csv")?;
-    let mut header_written = false;
+        .from_path(output_file)?;
+    wtr.write_record(ExtractedInfo::header_record())?;
     for (file, file_path) in files {
-        let extracted = extract_one(&file, file_path)?;
-        if !header_written {
-            wtr.write_record(extracted.header_record())?;
-            header_written = true;
+        match extract_one(&file, file_path.clone()) {
+            Ok(extracted) => wtr.write_record(extracted.as_record())?,
+            Err(e) => {
+                error!("{e:?} in file: {file_path:?}");
+            }
         }
-        wtr.write_record(extracted.as_record())?;
     }
     Ok(())
 }
