@@ -162,6 +162,7 @@ pub fn get_element<'a>(
     buf: &'a mut Vec<u8>,
     reader: &mut Reader<&[u8]>,
 ) -> Result<BytesStart<'a>> {
+    trace!("Looking for element: {:?}", std::str::from_utf8(name));
     loop {
         let event = reader.read_event_into(buf)?;
         match event {
@@ -169,7 +170,10 @@ pub fn get_element<'a>(
                 return Ok(element.to_owned())
             }
             Event::Eof => {
-                unreachable!("Should have got a table before the end")
+                bail!(
+                    "get_element failed looking for {:?} Should have got a table before the end",
+                    std::str::from_utf8(name)
+                )
             }
             other => {
                 trace!("get_element: {other:?}")
@@ -203,16 +207,25 @@ pub fn read_row_first_cell_text(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -
 }
 
 pub fn read_run_text(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<String> {
+    let mut ret = String::new();
+    // for _ in 0..2 {
     get_element(b"w:r", buf, reader)?;
-    get_element(b"w:t", buf, reader).unwrap();
+    get_element(b"w:t", buf, reader)?;
 
     let mut tbuf = vec![];
     let evt = reader.read_event_into(&mut tbuf).unwrap();
-    let Event::Text(t) = evt else {
-        unreachable!("{evt:?}")
-    };
-
-    Ok(String::from_utf8(t.to_vec())?)
+    match evt {
+        Event::Text(t) => {
+            let t = std::str::from_utf8(&t)?;
+            ret.push_str(t);
+        }
+        Event::End(_) => {
+            info!("End of w:t, must be empty");
+        }
+        other => unreachable!("{other:?}"),
+    }
+    // }
+    Ok(ret)
 }
 
 pub fn read_cell_text(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<String> {
@@ -227,7 +240,7 @@ pub struct HeaderInfo {
     pub province: String,
     pub district: String,
     pub school: String,
-    pub subject: String,
+    pub subject: Option<String>,
 }
 
 pub fn read_header_info(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<HeaderInfo> {
@@ -241,7 +254,7 @@ pub fn read_header_info(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result
                 let prov = read_cell_text(buf, reader)?;
                 results.province(prov);
             }
-            "District" => {
+            "District" | "District/Region" => {
                 let dis = read_cell_text(buf, reader)?;
                 results.district(dis);
             }
@@ -251,12 +264,24 @@ pub fn read_header_info(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result
             }
             "Subject" => {
                 let sub = read_cell_text(buf, reader)?;
-                results.subject(sub);
+                results.subject(Some(sub));
             }
             other => debug!("{other} text found"),
         }
-        if protection_counter > 5 {
+        if protection_counter > 5
+            && !(results.province.is_some()
+                && results.district.is_some()
+                && results.school.is_some())
+        {
             bail!("HeaderInfo loop ran too long. Builder status: {results:?}");
+        }
+        if results.province.is_some()
+            && results.district.is_some()
+            && results.school.is_some()
+            && results.subject.is_none()
+            && protection_counter > 4
+        {
+            results.subject(None);
         }
         match results.build() {
             Ok(res) => return Ok(res),
@@ -312,7 +337,7 @@ pub fn read_run_text_until(
     let mut res = vec![];
     loop {
         let s = read_run_text(buf, reader)?;
-        if s == stop_str {
+        if s.contains(stop_str) {
             break;
         }
         res.push(s);
@@ -373,7 +398,10 @@ impl ExtractedInfo {
             province,
             district,
             school,
-            subject,
+            subject
+                .as_ref()
+                .map(|x| x.as_str())
+                .unwrap_or("Subject not found"),
             areas_of_improvement,
             areas_of_non_compliance,
             directives_for_compliance,

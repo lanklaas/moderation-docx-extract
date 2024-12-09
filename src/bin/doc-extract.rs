@@ -4,6 +4,10 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
+use tracing::metadata::LevelFilter;
+use tracing::Level;
+use tracing_subscriber::fmt;
+use tracing_subscriber::Layer;
 
 use anyhow::bail;
 use anyhow::Result;
@@ -19,6 +23,7 @@ use doc_read::Part4;
 use quick_xml::Reader;
 use tracing::debug;
 use tracing::error;
+use tracing::info;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -35,24 +40,36 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
+    let error_log = File::create("/tmp/errors")?;
+    let (non_blocking, _guard) = tracing_appender::non_blocking(error_log);
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,tiberius=error,odbc_api=error".into()),
         )
         .with(tracing_subscriber::fmt::layer().with_span_events(FmtSpan::CLOSE))
+        .with(
+            fmt::layer()
+                .with_writer(non_blocking)
+                .with_ansi(false)
+                .with_filter(LevelFilter::from_level(Level::ERROR)),
+        )
         .init();
     let Args {
         data_dir,
         output_file,
     } = Args::parse();
+
+    info!("Parsing docx files...");
     let files = collect_doc_xmls(&data_dir)?;
+    info!("Found {} docx files", files.len());
     let mut wtr = WriterBuilder::new()
         .has_headers(true)
         .double_quote(true)
         .from_path(output_file)?;
     wtr.write_record(ExtractedInfo::header_record())?;
     for (file, file_path) in files {
+        info!("Processing file: {file_path:?}");
         match extract_one(&file, file_path.clone()) {
             Ok(extracted) => wtr.write_record(extracted.as_record())?,
             Err(e) => {
@@ -74,34 +91,35 @@ fn extract_one(doc: &[u8], file: PathBuf) -> Result<ExtractedInfo> {
     let info = read_header_info(&mut buf, &mut reader)?;
 
     read_to_text_starting_with(b"PART 4:", &mut buf, &mut reader)?;
-
+    debug!("Reading improv to compli");
     let ares = read_part_four(
         b"AREAS OF IMPROVEMENT",
         "AREAS OF NON-COMPLIANCE",
         &mut buf,
         &mut reader,
     )?;
-
+    debug!("Reading to directives");
     let bres = read_part_four_no_search(
         // b"AREAS OF NON-COMPLIANCE",
         "DIRECTIVES FOR COMPLIANCE",
         &mut buf,
         &mut reader,
     )?;
-
+    debug!("Reading to RECOMMENDATIONS");
     let cres = read_part_four_no_search(
         // b"DIRECTIVES FOR COMPLIANCE",
         "RECOMMENDATIONS FOR IMPROVEMENT",
         &mut buf,
         &mut reader,
     )?;
+    debug!("Reading to CONCLUSION");
     let dres = read_part_four_no_search(
         // b"RECOMMENDATIONS FOR IMPROVEMENT",
         "CONCLUSION",
         &mut buf,
         &mut reader,
     )?;
-
+    debug!("Part4 done");
     let p4 = Part4 {
         areas_of_improvement: ares,
         areas_of_non_compliance: bres,
