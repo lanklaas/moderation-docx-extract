@@ -42,7 +42,7 @@ pub fn extract_first_table_first_row(docx: &Docx) {
                         })
                         .collect();
 
-                    println!("Row Data: {:?}", row_text);
+                    println!("Row Data: {row_text:?}");
                 }
                 // if table_counter == 2 {
                 //     break; // Since we only need the first table
@@ -100,20 +100,18 @@ pub fn get_body<'a>(buf: &'a mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<
     loop {
         let event = reader.read_event_into(buf)?;
         match event {
-            Event::Start(element) => {
-                dbg!(std::str::from_utf8(element.name().as_ref())?);
-                match element.name().as_ref() {
-                    b"w:body" => {
-                        return Ok(element.to_owned());
-                    }
-                    el => {
-                        trace!("get_body not body: {el:?}");
-                    }
+            Event::Start(element) => match element.name().as_ref() {
+                b"w:body" => {
+                    return Ok(element.to_owned());
                 }
-            }
+                el => {
+                    trace!("get_body not body: {el:?}");
+                }
+            },
             Event::Decl(d) => {
                 debug!("get body Decl: {d:?}");
             }
+            // Event::Eof
             other => {
                 todo!("{other:?}")
             }
@@ -185,6 +183,14 @@ pub fn get_element<'a>(
 pub fn read_to_info_table(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<()> {
     get_body(buf, reader).unwrap();
     get_element(b"w:tbl", buf, reader)?;
+
+    Ok(())
+}
+
+pub const TEXT_STARTING_WITH: &[u8] = b"SECTION G:";
+
+pub fn read_to_sectiong_table(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<()> {
+    read_to_text_starting_with(TEXT_STARTING_WITH, buf, reader)?;
     get_element(b"w:tbl", buf, reader)?;
 
     Ok(())
@@ -249,26 +255,37 @@ pub fn read_header_info(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result
     loop {
         protection_counter += 1;
         let t = read_row_first_cell_text(buf, reader).unwrap();
-        match t.as_str() {
-            "Province" => {
-                let prov = read_cell_text(buf, reader)?;
-                results.province(prov);
+        // 2 Header columns in a row
+        let mut colval = String::new();
+        for i in 0..2 {
+            if i == 1 {
+                colval = read_cell_text(buf, reader)?;
+            } else {
+                colval = t.clone();
             }
-            "District" | "District/Region" => {
-                let dis = read_cell_text(buf, reader)?;
-                results.district(dis);
+            debug!("{colval}, Loop: {i}, protcount: {protection_counter} <- HeaderInfo");
+            match colval.as_str() {
+                "Province" => {
+                    let prov = read_cell_text(buf, reader)?;
+                    debug!("{prov} <- Province");
+                    results.province(prov);
+                }
+                "District" | "District/Region" => {
+                    let dis = read_cell_text(buf, reader)?;
+                    results.district(dis);
+                }
+                "School" => {
+                    let sc = read_cell_text(buf, reader)?;
+                    results.school(sc);
+                }
+                "Subject" => {
+                    let sub = read_cell_text(buf, reader)?;
+                    results.subject(Some(sub));
+                }
+                other => debug!("{other} text found"),
             }
-            "School" => {
-                let sc = read_cell_text(buf, reader)?;
-                results.school(sc);
-            }
-            "Subject" => {
-                let sub = read_cell_text(buf, reader)?;
-                results.subject(Some(sub));
-            }
-            other => debug!("{other} text found"),
         }
-        if protection_counter > 5
+        if protection_counter > 14
             && !(results.province.is_some()
                 && results.district.is_some()
                 && results.school.is_some())
@@ -279,7 +296,7 @@ pub fn read_header_info(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result
             && results.district.is_some()
             && results.school.is_some()
             && results.subject.is_none()
-            && protection_counter > 4
+            && protection_counter > 13
         {
             results.subject(None);
         }
@@ -345,38 +362,53 @@ pub fn read_run_text_until(
     Ok(res.join(""))
 }
 
-pub fn read_part_four(
-    start_section_text: &[u8],
-    next_section_text: &str,
-    buf: &mut Vec<u8>,
-    reader: &mut Reader<&[u8]>,
-) -> Result<String> {
-    read_to_text_starting_with(start_section_text, buf, reader)?;
-    get_element(b"w:tbl", buf, reader)?;
-    get_element(b"w:tr", buf, reader)?;
-    read_run_text_until(next_section_text, buf, reader)
-}
+pub fn read_sectiong_info(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<SectionG> {
+    let mut results = SectionGBuilder::create_empty();
+    let mut protection_counter = 0;
+    read_to_sectiong_table(buf, reader)?;
+    loop {
+        protection_counter += 1;
+        let t = read_row_first_cell_text(buf, reader).unwrap();
+        debug!("{t} <- sectiong table cell");
+        match t.as_str() {
+            "AREAS THAT REQUIRE INTERVENTION AND SUPPORT:" => {
+                let area = read_cell_text(buf, reader)?;
+                results.areas_that_require_intervention_and_support(area);
+            }
+            "RECOMMENDATIONS:" => {
+                let rec = read_cell_text(buf, reader)?;
+                results.recommendations(rec);
+            }
 
-/// If the previous call was read_part_four then the reader position is alredy in the correct place
-pub fn read_part_four_no_search(
-    next_section_text: &str,
-    buf: &mut Vec<u8>,
-    reader: &mut Reader<&[u8]>,
-) -> Result<String> {
-    get_element(b"w:tbl", buf, reader)?;
-    get_element(b"w:tr", buf, reader)?;
-    read_run_text_until(next_section_text, buf, reader)
+            other => debug!("{other} text found"),
+        }
+        if protection_counter > 3
+            && !(results
+                .areas_that_require_intervention_and_support
+                .is_some()
+                && results.recommendations.is_some())
+        {
+            bail!("HeaderInfo loop ran too long. Builder status: {results:?}");
+        }
+
+        match results.build() {
+            Ok(res) => return Ok(res),
+            Err(e) => {
+                debug!("{e}. Build not complete.");
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
 pub struct ExtractedInfo {
     pub header: HeaderInfo,
-    pub part4: Part4,
+    pub sectiong: SectionG,
     pub file: PathBuf,
 }
 
 impl ExtractedInfo {
-    pub fn as_record(&self) -> [&str; 9] {
+    pub fn as_record(&self) -> [&str; 7] {
         let Self {
             header:
                 HeaderInfo {
@@ -385,12 +417,10 @@ impl ExtractedInfo {
                     school,
                     subject,
                 },
-            part4:
-                Part4 {
-                    areas_of_improvement,
-                    areas_of_non_compliance,
-                    directives_for_compliance,
-                    recommendations_for_improvement,
+            sectiong:
+                SectionG {
+                    areas_that_require_intervention_and_support,
+                    recommendations,
                 },
             file,
         } = self;
@@ -402,33 +432,28 @@ impl ExtractedInfo {
                 .as_ref()
                 .map(|x| x.as_str())
                 .unwrap_or("Subject not found"),
-            areas_of_improvement,
-            areas_of_non_compliance,
-            directives_for_compliance,
-            recommendations_for_improvement,
+            areas_that_require_intervention_and_support,
+            recommendations,
             file.to_str().unwrap_or_default(),
         ]
     }
 
-    pub fn header_record() -> [&'static str; 9] {
+    pub fn header_record() -> [&'static str; 7] {
         [
             "Province",
             "District",
             "School",
             "Subject",
-            "Areas Of Improvement",
-            "Areas Of Non Compliance",
-            "Directives For Compliance",
+            "Areas That Require Intervention And Support",
             "Recommendations For Improvement",
             "File",
         ]
     }
 }
 
-#[derive(Debug, Serialize)]
-pub struct Part4 {
-    pub areas_of_improvement: String,
-    pub areas_of_non_compliance: String,
-    pub directives_for_compliance: String,
-    pub recommendations_for_improvement: String,
+#[derive(Builder, Debug, Serialize)]
+#[builder_struct_attr(derive(Debug))]
+pub struct SectionG {
+    pub areas_that_require_intervention_and_support: String,
+    pub recommendations: String,
 }

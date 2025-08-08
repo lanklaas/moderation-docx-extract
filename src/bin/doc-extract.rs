@@ -1,3 +1,5 @@
+use doc_read::read_sectiong_info;
+use doc_read::TEXT_STARTING_WITH;
 use std::ffi::OsStr;
 use std::fs;
 use std::fs::File;
@@ -14,12 +16,10 @@ use anyhow::Result;
 use clap::Parser;
 use csv::WriterBuilder;
 use doc_read::read_header_info;
-use doc_read::read_part_four;
-use doc_read::read_part_four_no_search;
+
 use doc_read::read_to_info_table;
 use doc_read::read_to_text_starting_with;
 use doc_read::ExtractedInfo;
-use doc_read::Part4;
 use quick_xml::Reader;
 use tracing::debug;
 use tracing::error;
@@ -90,45 +90,13 @@ fn extract_one(doc: &[u8], file: PathBuf) -> Result<ExtractedInfo> {
     read_to_info_table(&mut buf, &mut reader)?;
     let info = read_header_info(&mut buf, &mut reader)?;
 
-    read_to_text_starting_with(b"PART 4:", &mut buf, &mut reader)?;
-    debug!("Reading improv to compli");
-    let ares = read_part_four(
-        b"AREAS OF IMPROVEMENT",
-        "AREAS OF NON-COMPLIANCE",
-        &mut buf,
-        &mut reader,
-    )?;
-    debug!("Reading to directives");
-    let bres = read_part_four_no_search(
-        // b"AREAS OF NON-COMPLIANCE",
-        "DIRECTIVES FOR COMPLIANCE",
-        &mut buf,
-        &mut reader,
-    )?;
-    debug!("Reading to RECOMMENDATIONS");
-    let cres = read_part_four_no_search(
-        // b"DIRECTIVES FOR COMPLIANCE",
-        "RECOMMENDATIONS FOR IMPROVEMENT",
-        &mut buf,
-        &mut reader,
-    )?;
-    debug!("Reading to CONCLUSION");
-    let dres = read_part_four_no_search(
-        // b"RECOMMENDATIONS FOR IMPROVEMENT",
-        "CONCLUSION",
-        &mut buf,
-        &mut reader,
-    )?;
-    debug!("Part4 done");
-    let p4 = Part4 {
-        areas_of_improvement: ares,
-        areas_of_non_compliance: bres,
-        directives_for_compliance: cres,
-        recommendations_for_improvement: dres,
-    };
+    // read_to_text_starting_with(TEXT_STARTING_WITH, &mut buf, &mut reader)?;
+    debug!("Reading areas_that_require_intervention_and_support");
+    let secg = read_sectiong_info(&mut buf, &mut reader)?;
+
     Ok(ExtractedInfo {
         header: info,
-        part4: p4,
+        sectiong: secg,
         file,
     })
 }
