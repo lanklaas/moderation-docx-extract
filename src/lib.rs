@@ -1,16 +1,16 @@
-use std::path::PathBuf;
+pub mod info_extract;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use derive_builder::Builder;
-use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
 use serde::Serialize;
 use tracing::{debug, info, trace};
 
 use docx_rust::document::{
     Paragraph, ParagraphContent, RunContent, TableCell, TableCellContent, TableRowContent,
 };
-use docx_rust::{document::BodyContent, Docx};
+use docx_rust::{Docx, document::BodyContent};
 
 pub fn extract_first_table_first_row(docx: &Docx) {
     // let mut table_counter = 0;
@@ -125,7 +125,7 @@ pub fn get_first_table<'a>(reader: &mut Reader<&[u8]>) -> Result<BytesStart<'a>>
         let event = reader.read_event_into(&mut buf)?;
         match event {
             Event::Start(element) if element.name().as_ref() == b"w:tbl" => {
-                return Ok(element.to_owned())
+                return Ok(element.to_owned());
             }
             Event::Eof => {
                 unreachable!("Should have got a table before the end")
@@ -143,7 +143,7 @@ pub fn get_table_row<'a>(reader: &mut Reader<&[u8]>) -> Result<BytesStart<'a>> {
         let event = reader.read_event_into(&mut buf)?;
         match event {
             Event::Start(element) if element.name().as_ref() == b"w:tr" => {
-                return Ok(element.to_owned())
+                return Ok(element.to_owned());
             }
             Event::Eof => {
                 unreachable!("Should have got a table before the end")
@@ -165,7 +165,7 @@ pub fn get_element<'a>(
         let event = reader.read_event_into(buf)?;
         match event {
             Event::Start(element) if element.name().as_ref() == name => {
-                return Ok(element.to_owned())
+                return Ok(element.to_owned());
             }
             Event::Eof => {
                 bail!(
@@ -182,15 +182,6 @@ pub fn get_element<'a>(
 
 pub fn read_to_info_table(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<()> {
     get_body(buf, reader).unwrap();
-    get_element(b"w:tbl", buf, reader)?;
-
-    Ok(())
-}
-
-pub const TEXT_STARTING_WITH: &[u8] = b"SECTION G:";
-
-pub fn read_to_sectiong_table(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<()> {
-    read_to_text_starting_with(TEXT_STARTING_WITH, buf, reader)?;
     get_element(b"w:tbl", buf, reader)?;
 
     Ok(())
@@ -245,7 +236,7 @@ pub fn read_cell_text(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<S
 pub struct HeaderInfo {
     pub province: String,
     pub district: String,
-    pub school: String,
+    pub school: Option<String>,
     pub subject: Option<String>,
 }
 
@@ -264,37 +255,37 @@ pub fn read_header_info(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result
                 colval = t.clone();
             }
             debug!("{colval}, Loop: {i}, protcount: {protection_counter} <- HeaderInfo");
-            match colval.as_str() {
-                "Province" => {
+            match colval
+                .split_whitespace()
+                .collect::<String>()
+                .to_lowercase()
+                .as_str()
+            {
+                "province" | "province:" => {
                     let prov = read_cell_text(buf, reader)?;
                     debug!("{prov} <- Province");
                     results.province(prov);
                 }
-                "District" | "District/Region" => {
+                "district" | "district/region" | "district:" => {
                     let dis = read_cell_text(buf, reader)?;
                     results.district(dis);
                 }
-                "School" => {
+                "school" | "school:" => {
                     let sc = read_cell_text(buf, reader)?;
-                    results.school(sc);
+                    results.school(Some(sc));
                 }
-                "Subject" => {
+                "subject" | "subject:" => {
                     let sub = read_cell_text(buf, reader)?;
                     results.subject(Some(sub));
                 }
                 other => debug!("{other} text found"),
             }
         }
-        if protection_counter > 14
-            && !(results.province.is_some()
-                && results.district.is_some()
-                && results.school.is_some())
-        {
+        if protection_counter > 14 && !(results.province.is_some() && results.district.is_some()) {
             bail!("HeaderInfo loop ran too long. Builder status: {results:?}");
         }
         if results.province.is_some()
             && results.district.is_some()
-            && results.school.is_some()
             && results.subject.is_none()
             && protection_counter > 13
         {
@@ -309,10 +300,18 @@ pub fn read_header_info(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result
     }
 }
 
+#[derive(Debug, Default)]
+pub enum Case {
+    #[default]
+    Sensitive,
+    Ignore,
+}
+
 pub fn read_to_text_starting_with(
     starts_with: &[u8],
     buf: &mut Vec<u8>,
     reader: &mut Reader<&[u8]>,
+    case: Case,
 ) -> Result<()> {
     loop {
         get_element(b"w:t", buf, reader)?;
@@ -335,12 +334,27 @@ pub fn read_to_text_starting_with(
             }
             other => unreachable!("{other:?}"),
         };
-        if t.starts_with(starts_with) {
-            info!(
-                "Found {t:?} starts with {:?}",
-                std::str::from_utf8(starts_with)
-            );
-            break;
+        match case {
+            Case::Sensitive => {
+                if t.starts_with(starts_with) {
+                    info!(
+                        "Found {t:?} starts with {:?}",
+                        std::str::from_utf8(starts_with)
+                    );
+                    break;
+                }
+            }
+            Case::Ignore => {
+                if t.to_ascii_lowercase()
+                    .starts_with(starts_with.to_ascii_lowercase().as_slice())
+                {
+                    info!(
+                        "Found {t:?} starts with {:?}",
+                        std::str::from_utf8(starts_with)
+                    );
+                    break;
+                }
+            }
         }
     }
     Ok(())
@@ -362,98 +376,25 @@ pub fn read_run_text_until(
     Ok(res.join(""))
 }
 
-pub fn read_sectiong_info(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<SectionG> {
-    let mut results = SectionGBuilder::create_empty();
-    let mut protection_counter = 0;
-    read_to_sectiong_table(buf, reader)?;
+pub fn read_all_table_cells(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<String> {
+    get_element(b"w:tbl", buf, reader)?;
+    let mut ret = vec![];
     loop {
-        protection_counter += 1;
-        let t = read_row_first_cell_text(buf, reader).unwrap();
-        debug!("{t} <- sectiong table cell");
-        match t.as_str() {
-            "AREAS THAT REQUIRE INTERVENTION AND SUPPORT:" => {
-                let area = read_cell_text(buf, reader)?;
-                results.areas_that_require_intervention_and_support(area);
+        let event = reader.read_event_into(buf)?;
+        match event {
+            Event::Text(t) => {
+                ret.push(String::from_utf8(t.to_vec())?);
             }
-            "RECOMMENDATIONS:" => {
-                let rec = read_cell_text(buf, reader)?;
-                results.recommendations(rec);
+            Event::End(e) if e.name().as_ref() == b"w:tbl" => return Ok(ret.join("")),
+            Event::Eof => {
+                bail!(
+                    "get_element failed looking for table text data. Should have got a table before the end",
+                    // std::str::from_utf8(name)
+                )
             }
-
-            other => debug!("{other} text found"),
-        }
-        if protection_counter > 3
-            && !(results
-                .areas_that_require_intervention_and_support
-                .is_some()
-                && results.recommendations.is_some())
-        {
-            bail!("HeaderInfo loop ran too long. Builder status: {results:?}");
-        }
-
-        match results.build() {
-            Ok(res) => return Ok(res),
-            Err(e) => {
-                debug!("{e}. Build not complete.");
+            other => {
+                trace!("get_element: {other:?}")
             }
         }
     }
-}
-
-#[derive(Debug, Serialize)]
-pub struct ExtractedInfo {
-    pub header: HeaderInfo,
-    pub sectiong: SectionG,
-    pub file: PathBuf,
-}
-
-impl ExtractedInfo {
-    pub fn as_record(&self) -> [&str; 7] {
-        let Self {
-            header:
-                HeaderInfo {
-                    province,
-                    district,
-                    school,
-                    subject,
-                },
-            sectiong:
-                SectionG {
-                    areas_that_require_intervention_and_support,
-                    recommendations,
-                },
-            file,
-        } = self;
-        [
-            province,
-            district,
-            school,
-            subject
-                .as_ref()
-                .map(|x| x.as_str())
-                .unwrap_or("Subject not found"),
-            areas_that_require_intervention_and_support,
-            recommendations,
-            file.to_str().unwrap_or_default(),
-        ]
-    }
-
-    pub fn header_record() -> [&'static str; 7] {
-        [
-            "Province",
-            "District",
-            "School",
-            "Subject",
-            "Areas That Require Intervention And Support",
-            "Recommendations For Improvement",
-            "File",
-        ]
-    }
-}
-
-#[derive(Builder, Debug, Serialize)]
-#[builder_struct_attr(derive(Debug))]
-pub struct SectionG {
-    pub areas_that_require_intervention_and_support: String,
-    pub recommendations: String,
 }

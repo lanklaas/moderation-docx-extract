@@ -1,25 +1,25 @@
-use doc_read::read_sectiong_info;
-use doc_read::TEXT_STARTING_WITH;
+use doc_read::info_extract::read_body_info;
 use std::ffi::OsStr;
 use std::fs;
 use std::fs::File;
+use std::io::BufRead;
+use std::io::BufReader;
 use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
-use tracing::metadata::LevelFilter;
 use tracing::Level;
-use tracing_subscriber::fmt;
+use tracing::metadata::LevelFilter;
 use tracing_subscriber::Layer;
+use tracing_subscriber::fmt;
 
-use anyhow::bail;
 use anyhow::Result;
+use anyhow::bail;
 use clap::Parser;
 use csv::WriterBuilder;
 use doc_read::read_header_info;
 
+use doc_read::info_extract::ExtractedInfo;
 use doc_read::read_to_info_table;
-use doc_read::read_to_text_starting_with;
-use doc_read::ExtractedInfo;
 use quick_xml::Reader;
 use tracing::debug;
 use tracing::error;
@@ -37,6 +37,11 @@ struct Args {
     data_dir: PathBuf,
     #[clap(default_value = "/tmp/out.csv")]
     output_file: PathBuf,
+    #[clap(
+        short,
+        help = "The data_dir path is a file with a list of paths to process"
+    )]
+    input_is_list_file: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -58,11 +63,24 @@ fn main() -> anyhow::Result<()> {
     let Args {
         data_dir,
         output_file,
+        input_is_list_file,
     } = Args::parse();
 
     info!("Parsing docx files...");
-    let files = collect_doc_xmls(&data_dir)?;
+    let files = if !input_is_list_file {
+        collect_doc_xmls(&data_dir)?
+    } else {
+        let paths = BufReader::new(File::open(data_dir)?);
+        let mut ret = vec![];
+        for path in paths.lines() {
+            let path = path?;
+            let mut docs = collect_doc_xmls(Path::new(&path))?;
+            ret.append(&mut docs);
+        }
+        ret
+    };
     info!("Found {} docx files", files.len());
+
     let mut wtr = WriterBuilder::new()
         .has_headers(true)
         .double_quote(true)
@@ -71,7 +89,7 @@ fn main() -> anyhow::Result<()> {
     for (file, file_path) in files {
         info!("Processing file: {file_path:?}");
         match extract_one(&file, file_path.clone()) {
-            Ok(extracted) => wtr.write_record(extracted.as_record())?,
+            Ok(extracted) => wtr.write_record(extracted.into_record())?,
             Err(e) => {
                 error!("{e:?} in file: {file_path:?}");
             }
@@ -92,11 +110,11 @@ fn extract_one(doc: &[u8], file: PathBuf) -> Result<ExtractedInfo> {
 
     // read_to_text_starting_with(TEXT_STARTING_WITH, &mut buf, &mut reader)?;
     debug!("Reading areas_that_require_intervention_and_support");
-    let secg = read_sectiong_info(&mut buf, &mut reader)?;
+    let body = read_body_info(&mut buf, &mut reader)?;
 
     Ok(ExtractedInfo {
         header: info,
-        sectiong: secg,
+        body,
         file,
     })
 }
