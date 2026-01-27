@@ -1,99 +1,175 @@
 pub mod info_extract;
 
+use docx_rs::{
+    DocumentChild, Paragraph, ParagraphChild, RunChild, TableCellContent, TableChild,
+    TableRowChild, read_docx,
+};
+use docx_rs::{Docx, Table};
+use state::{IsXml, Loaded, NotLoaded};
+use std::fs::File;
+use std::io::{BufReader, Read};
+use std::ops::{Deref, DerefMut};
+use std::path::Path;
+
 use anyhow::{Result, bail};
 use derive_builder::Builder;
+
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use serde::Serialize;
 use tracing::{debug, info, trace};
 
-use docx_rust::document::{
-    Paragraph, ParagraphContent, RunContent, TableCell, TableCellContent, TableRowContent,
-};
-use docx_rust::{Docx, document::BodyContent};
+pub type UnloadedDoc = DocBytes<NotLoaded>;
+pub type LoadedDoc = DocBytes<Loaded>;
+pub type XmlDoc = DocBytes<IsXml>;
 
-pub fn extract_first_table_first_row(docx: &Docx) {
-    // let mut table_counter = 0;
-    // Iterate through all blocks in the document
-    for block in &docx.document.body.content {
-        match block {
-            BodyContent::Table(table) => {
-                // table_counter += 1;
-                // Found the first table
-                for row in &table.rows {
-                    // Extract text from each cell in the first row
-                    let row_text: Vec<String> = row
-                        .cells
-                        .iter()
-                        .filter(|x| matches!(x, TableRowContent::TableCell(_)))
-                        .map(|x| {
-                            let TableRowContent::TableCell(c) = x else {
-                                unreachable!("filter")
-                            };
-                            c
-                        })
-                        .map(|cell| {
-                            // cell.content.iter().find(|x| matches!(x, TableCellContent::))
-                            // let TableRowContent::TableCell(c) = cell else {
-                            //     unreachable!("filter")
-                            // };
+#[derive(Debug)]
+pub struct DocBytes<S> {
+    buf: Vec<u8>,
+    _state: S,
+}
 
-                            extract_text_from_cell(cell)
-                        })
-                        .collect();
-
-                    println!("Row Data: {row_text:?}");
-                }
-                // if table_counter == 2 {
-                //     break; // Since we only need the first table
-                // }
-            }
-            BodyContent::Sdt(s) => {
-                panic!("{s:?}")
-            }
-            BodyContent::Paragraph(p) => {
-                trace!("body para: {p:?}")
-            }
-            other => todo!("{other:?}"),
+impl Default for UnloadedDoc {
+    fn default() -> Self {
+        Self {
+            buf: vec![],
+            _state: NotLoaded,
         }
     }
 }
 
-// Helper function to extract text from a table cell
-pub fn extract_text_from_cell(cell: &TableCell) -> String {
-    cell.content
-        .iter()
-        .map(|block| {
-            let TableCellContent::Paragraph(paragraph) = block;
-            paragraph.text()
-        })
-        .collect::<Vec<String>>()
-        .join(",")
+pub mod state {
+    use docx_rs::Docx;
+
+    pub struct NotLoaded;
+    pub struct Loaded;
+    pub struct IsXml {
+        pub(super) xml_doc: Docx,
+    }
 }
-// Helper function to convert a paragraph to text
-pub fn paragraph_to_text(paragraph: &Paragraph) -> String {
-    paragraph
-        .content
-        .iter()
-        // .filter(|x| matches!(x, ParagraphContent::Run(_)))
-        .map(|run| {
-            let ParagraphContent::Run(r) = run else {
-                unreachable!("filter")
-            };
-            r.content
-                .iter()
-                // .get(0)
-                .find(|x| matches!(x, RunContent::Text(_)))
-                .map(|x| {
-                    let RunContent::Text(t) = x else {
-                        unreachable!("filter")
-                    };
-                    t.text.to_string()
-                })
-                .unwrap_or_default()
+
+impl UnloadedDoc {
+    pub fn from_path(self, path: &Path) -> Result<LoadedDoc> {
+        let Self { mut buf, .. } = self;
+        let mut rd = BufReader::new(File::open(path)?);
+        rd.read_to_end(&mut buf)?;
+        Ok(LoadedDoc {
+            buf,
+            _state: Loaded,
         })
-        .collect::<Vec<String>>()
-        .join("")
+    }
+}
+
+impl LoadedDoc {
+    pub fn read_docx(self) -> Result<XmlDoc> {
+        let Self { buf, .. } = self;
+        let doc = read_docx(&buf)?;
+        Ok(DocBytes {
+            buf,
+            _state: IsXml { xml_doc: doc },
+        })
+    }
+}
+
+pub enum Block {
+    Paragraph(String),
+    Table(Vec<String>), // or just String if you prefer
+}
+
+impl XmlDoc {
+    pub fn unload(self) -> UnloadedDoc {
+        let Self { mut buf, .. } = self;
+        buf.clear();
+        DocBytes {
+            buf,
+            _state: NotLoaded,
+        }
+    }
+    pub fn extract_doc_text(&mut self) -> Result<Vec<String>> {
+        let mut tablestack = vec![];
+        let mut parastack = vec![];
+        let children = &mut self.document.children;
+        while let Some(child) = children.pop() {
+            match child {
+                DocumentChild::Table(t) => {
+                    tablestack.push(*t);
+                }
+                DocumentChild::Paragraph(p) => {
+                    parastack.push(*p);
+                }
+                other => {
+                    debug!("Unhandled document child: {other:?}");
+                    continue;
+                }
+            }
+        }
+
+        while let Some(ts) = tablestack.pop() {
+            extract_table_text(ts, &mut parastack, &mut tablestack);
+        }
+        let mut ret = Vec::with_capacity(parastack.len());
+        while let Some(p) = parastack.pop() {
+            let t = extract_paragraph_text(p);
+            ret.push(t);
+        }
+        Ok(ret)
+    }
+}
+
+impl Deref for XmlDoc {
+    type Target = Docx;
+    fn deref(&self) -> &Self::Target {
+        &self._state.xml_doc
+    }
+}
+
+impl DerefMut for XmlDoc {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self._state.xml_doc
+    }
+}
+
+pub fn extract_table_text(
+    table: Table,
+    parastack: &mut Vec<Paragraph>,
+    tablestack: &mut Vec<Table>,
+) {
+    for row in table.rows {
+        let TableChild::TableRow(row) = row;
+        for cell in row.cells {
+            let TableRowChild::TableCell(c) = cell;
+
+            for cell in c.children {
+                match cell {
+                    TableCellContent::Paragraph(p) => parastack.push(p),
+                    TableCellContent::Table(t) => tablestack.push(t),
+                    docx_rs::TableCellContent::StructuredDataTag(_)
+                    | docx_rs::TableCellContent::TableOfContents(_) => todo!(),
+                }
+            }
+        }
+    }
+}
+
+pub fn extract_paragraph_text(p: Paragraph) -> String {
+    let mut ret = vec![];
+    for par in p.children {
+        match par {
+            ParagraphChild::Run(r) => {
+                for run in r.children {
+                    match run {
+                        RunChild::Text(t) => {
+                            ret.push(t.text);
+                        }
+                        RunChild::Drawing(_) => debug!("Drawing found"),
+                        other => debug!("Unhandled run found: {other:?}"),
+                    }
+                }
+            }
+            other => debug!("Unhandled element found: {other:?}"),
+        }
+    }
+    ret.join("")
 }
 
 pub fn get_body<'a>(buf: &'a mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<BytesStart<'a>> {

@@ -1,5 +1,7 @@
 use crate::Case;
 use crate::HeaderInfo;
+use crate::LoadedDoc;
+use crate::XmlDoc;
 use crate::read_all_table_cells;
 use crate::read_run_text;
 use crate::read_to_text_starting_with;
@@ -19,12 +21,10 @@ pub struct ExtractedInfo {
     pub file: PathBuf,
 }
 
-pub fn read_body_info(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<Vec<String>> {
+pub fn read_body_info(doc: &mut XmlDoc) -> Result<Vec<String>> {
     let mut ret = vec![];
+    let text = doc.extract_doc_text()?;
     for term in EXTRACT_SEARCH_TERMS_IN_ORDER.iter().take(TERM_LEN) {
-        read_to_text_starting_with(term.as_bytes(), buf, reader, Case::Ignore)?;
-
-        let s = read_all_table_cells(buf, reader)?;
         ret.push(s);
     }
 
