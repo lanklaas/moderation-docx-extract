@@ -9,7 +9,7 @@ use state::{IsXml, Loaded, NotLoaded};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::ops::{Deref, DerefMut};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use derive_builder::Builder;
@@ -26,6 +26,7 @@ pub type XmlDoc = DocBytes<IsXml>;
 #[derive(Debug)]
 pub struct DocBytes<S> {
     buf: Vec<u8>,
+    path: PathBuf,
     _state: S,
 }
 
@@ -33,6 +34,7 @@ impl Default for UnloadedDoc {
     fn default() -> Self {
         Self {
             buf: vec![],
+            path: PathBuf::new(),
             _state: NotLoaded,
         }
     }
@@ -49,12 +51,13 @@ pub mod state {
 }
 
 impl UnloadedDoc {
-    pub fn from_path(self, path: &Path) -> Result<LoadedDoc> {
+    pub fn from_path(self, path: PathBuf) -> Result<LoadedDoc> {
         let Self { mut buf, .. } = self;
-        let mut rd = BufReader::new(File::open(path)?);
+        let mut rd = BufReader::new(File::open(&path)?);
         rd.read_to_end(&mut buf)?;
         Ok(LoadedDoc {
             buf,
+            path,
             _state: Loaded,
         })
     }
@@ -62,10 +65,11 @@ impl UnloadedDoc {
 
 impl LoadedDoc {
     pub fn read_docx(self) -> Result<XmlDoc> {
-        let Self { buf, .. } = self;
+        let Self { buf, path, .. } = self;
         let doc = read_docx(&buf)?;
         Ok(DocBytes {
             buf,
+            path,
             _state: IsXml { xml_doc: doc },
         })
     }
@@ -84,11 +88,15 @@ impl Block {
 }
 
 impl XmlDoc {
+    pub fn file(&self) -> &Path {
+        self.path.as_path()
+    }
     pub fn unload(self) -> UnloadedDoc {
         let Self { mut buf, .. } = self;
         buf.clear();
         DocBytes {
             buf,
+            path: PathBuf::new(),
             _state: NotLoaded,
         }
     }
@@ -148,6 +156,22 @@ impl DerefMut for XmlDoc {
 pub struct DocBlocks(Vec<Block>);
 
 impl DocBlocks {
+    pub fn find_table_containing_one_of(&self, text: &[&str]) -> Option<&Block> {
+        let Some(opt) = self
+            .0
+            .iter()
+            .inspect(|x| {
+                dbg!(x);
+            })
+            .find(|x| match x {
+                Block::Paragraph(_) => false,
+                Block::Table(t) => t.iter().any(|x| text.contains(&x.trim())),
+            })
+        else {
+            unreachable!("Doc should have the header table");
+        };
+        Some(opt)
+    }
     pub fn find_term_table_text(&self, term: &str) -> Option<&Block> {
         let Some(position) = self.0.iter().position(|x| {
             if !x.is_paragraph() {

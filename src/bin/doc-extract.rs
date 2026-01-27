@@ -1,6 +1,7 @@
 use doc_read::UnloadedDoc;
 use doc_read::XmlDoc;
 use doc_read::info_extract::read_body_info;
+use doc_read::info_extract::read_head;
 use std::ffi::OsStr;
 use std::fs;
 use std::fs::File;
@@ -83,16 +84,15 @@ fn main() -> anyhow::Result<()> {
     info!("Found {} docx files", files.len());
 
     let mut wtr = WriterBuilder::new()
-        .has_headers(true)
         .double_quote(true)
         .from_path(output_file)?;
     wtr.write_record(ExtractedInfo::header_record())?;
     let mut doc = UnloadedDoc::default();
     for file_path in files {
-        let mut ldoc = doc.from_path(&file_path)?.read_docx()?;
+        let mut ldoc = doc.from_path(file_path.clone())?.read_docx()?;
         info!("Processing file: {file_path:?}");
         match extract_one(&mut ldoc) {
-            Ok(extracted) => wtr.write_record(extracted.into_record())?,
+            Ok(extracted) => wtr.write_record(extracted.into_record(ldoc.file()))?,
             Err(e) => {
                 error!("{e:?} in file: {file_path:?}");
             }
@@ -103,18 +103,14 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn extract_one(doc: &mut XmlDoc) -> Result<ExtractedInfo> {
-    // let info = read_header_info(&mut buf, &mut reader)?;
-
+    let blocks = doc.extract_doc_blocks()?;
+    let info = read_head(&blocks);
+    dbg!(&info);
     // read_to_text_starting_with(TEXT_STARTING_WITH, &mut buf, &mut reader)?;
     debug!("Reading areas_that_require_intervention_and_support");
-    let body = read_body_info(doc)?;
-    dbg!(body);
-    todo!()
-    // Ok(ExtractedInfo {
-    //     header: info,
-    //     body,
-    //     file,
-    // })
+    let body = read_body_info(&blocks)?;
+
+    Ok(ExtractedInfo { header: info, body })
 }
 
 fn collect_doc_xmls(dir_with_files: &Path) -> anyhow::Result<Vec<(Vec<u8>, PathBuf)>> {
