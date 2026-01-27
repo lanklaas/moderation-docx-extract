@@ -1,3 +1,5 @@
+use doc_read::UnloadedDoc;
+use doc_read::XmlDoc;
 use doc_read::info_extract::read_body_info;
 use std::ffi::OsStr;
 use std::fs;
@@ -68,14 +70,13 @@ fn main() -> anyhow::Result<()> {
 
     info!("Parsing docx files...");
     let files = if !input_is_list_file {
-        collect_doc_xmls(&data_dir)?
+        collect_docs(&data_dir)?
     } else {
         let paths = BufReader::new(File::open(data_dir)?);
         let mut ret = vec![];
         for path in paths.lines() {
             let path = path?;
-            let mut docs = collect_doc_xmls(Path::new(&path))?;
-            ret.append(&mut docs);
+            ret.push(PathBuf::from(path));
         }
         ret
     };
@@ -86,37 +87,34 @@ fn main() -> anyhow::Result<()> {
         .double_quote(true)
         .from_path(output_file)?;
     wtr.write_record(ExtractedInfo::header_record())?;
-    for (file, file_path) in files {
+    let mut doc = UnloadedDoc::default();
+    for file_path in files {
+        let mut ldoc = doc.from_path(&file_path)?.read_docx()?;
         info!("Processing file: {file_path:?}");
-        match extract_one(&file, file_path.clone()) {
+        match extract_one(&mut ldoc) {
             Ok(extracted) => wtr.write_record(extracted.into_record())?,
             Err(e) => {
                 error!("{e:?} in file: {file_path:?}");
             }
         }
+        doc = ldoc.unload();
     }
     Ok(())
 }
 
-fn extract_one(doc: &[u8], file: PathBuf) -> Result<ExtractedInfo> {
-    let mut reader = Reader::from_reader(doc);
-
-    let config = reader.config_mut();
-
-    config.trim_text(true);
-    let mut buf = vec![];
-    read_to_info_table(&mut buf, &mut reader)?;
-    let info = read_header_info(&mut buf, &mut reader)?;
+fn extract_one(doc: &mut XmlDoc) -> Result<ExtractedInfo> {
+    // let info = read_header_info(&mut buf, &mut reader)?;
 
     // read_to_text_starting_with(TEXT_STARTING_WITH, &mut buf, &mut reader)?;
     debug!("Reading areas_that_require_intervention_and_support");
-    let body = read_body_info(&mut buf, &mut reader)?;
-
-    Ok(ExtractedInfo {
-        header: info,
-        body,
-        file,
-    })
+    let body = read_body_info(doc)?;
+    dbg!(body);
+    todo!()
+    // Ok(ExtractedInfo {
+    //     header: info,
+    //     body,
+    //     file,
+    // })
 }
 
 fn collect_doc_xmls(dir_with_files: &Path) -> anyhow::Result<Vec<(Vec<u8>, PathBuf)>> {
@@ -136,6 +134,24 @@ fn collect_doc_xmls(dir_with_files: &Path) -> anyhow::Result<Vec<(Vec<u8>, PathB
         let mut buf = Vec::with_capacity(file.size().try_into().unwrap());
         file.read_to_end(&mut buf)?;
         ret.push((buf, f.path().to_path_buf()));
+    }
+    if ret.is_empty() {
+        bail!(
+            "No docx files found in {:?}",
+            fs::canonicalize(dir_with_files)
+        );
+    }
+    Ok(ret)
+}
+
+fn collect_docs(dir_with_files: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut ret = vec![];
+    for f in WalkDir::new(dir_with_files)
+        .into_iter()
+        .filter_map(|x| x.ok())
+        .filter(|x| x.path().extension() == Some(OsStr::new("docx")))
+    {
+        ret.push(f.path().to_path_buf());
     }
     if ret.is_empty() {
         bail!(

@@ -17,7 +17,7 @@ use derive_builder::Builder;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use serde::Serialize;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 pub type UnloadedDoc = DocBytes<NotLoaded>;
 pub type LoadedDoc = DocBytes<Loaded>;
@@ -71,9 +71,16 @@ impl LoadedDoc {
     }
 }
 
+#[derive(Debug)]
 pub enum Block {
     Paragraph(String),
     Table(Vec<String>), // or just String if you prefer
+}
+
+impl Block {
+    pub fn is_paragraph(&self) -> bool {
+        matches!(self, Self::Paragraph(_))
+    }
 }
 
 impl XmlDoc {
@@ -85,34 +92,43 @@ impl XmlDoc {
             _state: NotLoaded,
         }
     }
-    pub fn extract_doc_text(&mut self) -> Result<Vec<String>> {
-        let mut tablestack = vec![];
-        let mut parastack = vec![];
-        let children = &mut self.document.children;
-        while let Some(child) = children.pop() {
+    pub fn extract_doc_blocks(&mut self) -> Result<DocBlocks> {
+        let mut blocks = Vec::new();
+
+        // Take the children so we can own them (and not reverse them)
+        let children = std::mem::take(&mut self.document.children);
+
+        for child in children {
             match child {
-                DocumentChild::Table(t) => {
-                    tablestack.push(*t);
-                }
                 DocumentChild::Paragraph(p) => {
-                    parastack.push(*p);
+                    let text = extract_paragraph_text(*p);
+                    if !text.trim().is_empty() {
+                        blocks.push(Block::Paragraph(text));
+                    }
+                }
+                DocumentChild::Table(t) => {
+                    let mut paras_in_table = Vec::new();
+                    collect_table_paragraphs(*t, &mut paras_in_table);
+
+                    let mut table_text = Vec::new();
+                    for p in paras_in_table {
+                        let text = extract_paragraph_text(p);
+                        if !text.trim().is_empty() {
+                            table_text.push(text);
+                        }
+                    }
+
+                    if !table_text.is_empty() {
+                        blocks.push(Block::Table(table_text));
+                    }
                 }
                 other => {
                     debug!("Unhandled document child: {other:?}");
-                    continue;
                 }
             }
         }
 
-        while let Some(ts) = tablestack.pop() {
-            extract_table_text(ts, &mut parastack, &mut tablestack);
-        }
-        let mut ret = Vec::with_capacity(parastack.len());
-        while let Some(p) = parastack.pop() {
-            let t = extract_paragraph_text(p);
-            ret.push(t);
-        }
-        Ok(ret)
+        Ok(DocBlocks(blocks))
     }
 }
 
@@ -129,22 +145,67 @@ impl DerefMut for XmlDoc {
     }
 }
 
-pub fn extract_table_text(
-    table: Table,
-    parastack: &mut Vec<Paragraph>,
-    tablestack: &mut Vec<Table>,
-) {
+pub struct DocBlocks(Vec<Block>);
+
+impl DocBlocks {
+    pub fn find_term_table_text(&self, term: &str) -> Option<&Block> {
+        let Some(position) = self.0.iter().position(|x| {
+            if !x.is_paragraph() {
+                return false;
+            }
+            let Block::Paragraph(p) = x else {
+                unreachable!()
+            };
+            p.trim() == term
+
+            // match x {
+            //     Block::Paragraph(p) => p.trim() == term,
+            //     Block::Table(t) => t.iter().any(|x| x.trim() == term),
+            // }
+        }) else {
+            warn!("Running case insensitive search for: {term}");
+            return self.find_term_table_text_case_insensitive(term);
+        };
+        self.0.get(position + 1)
+    }
+
+    pub fn find_term_table_text_case_insensitive(&self, term: &str) -> Option<&Block> {
+        let Some(position) = self.0.iter().position(|x| {
+            if !x.is_paragraph() {
+                return false;
+            }
+            let Block::Paragraph(p) = x else {
+                unreachable!()
+            };
+            p.trim().to_lowercase() == term.to_lowercase()
+            // match x {
+            //     Block::Paragraph(p) => p.to_lowercase() == term.to_lowercase(),
+            //     Block::Table(t) => t
+            //         .iter()
+            //         .map(|x| x.to_lowercase())
+            //         .any(|x| x == term.to_lowercase()),
+            // }
+        }) else {
+            unreachable!("Should have the term: {term}");
+        };
+        self.0.get(position + 1)
+    }
+}
+
+fn collect_table_paragraphs(table: Table, acc: &mut Vec<Paragraph>) {
     for row in table.rows {
         let TableChild::TableRow(row) = row;
         for cell in row.cells {
             let TableRowChild::TableCell(c) = cell;
 
-            for cell in c.children {
-                match cell {
-                    TableCellContent::Paragraph(p) => parastack.push(p),
-                    TableCellContent::Table(t) => tablestack.push(t),
-                    docx_rs::TableCellContent::StructuredDataTag(_)
-                    | docx_rs::TableCellContent::TableOfContents(_) => todo!(),
+            for cell_child in c.children {
+                match cell_child {
+                    TableCellContent::Paragraph(p) => acc.push(p),
+                    TableCellContent::Table(t) => {
+                        // recursion for nested tables
+                        collect_table_paragraphs(t, acc);
+                    }
+                    other => debug!("Unhandled collect_table_paragraphs: {other:?}"),
                 }
             }
         }
@@ -161,7 +222,6 @@ pub fn extract_paragraph_text(p: Paragraph) -> String {
                         RunChild::Text(t) => {
                             ret.push(t.text);
                         }
-                        RunChild::Drawing(_) => debug!("Drawing found"),
                         other => debug!("Unhandled run found: {other:?}"),
                     }
                 }
