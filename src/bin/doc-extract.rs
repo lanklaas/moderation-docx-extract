@@ -1,31 +1,24 @@
-use doc_read::UnloadedDoc;
-use doc_read::XmlDoc;
-use doc_read::info_extract::read_body_info;
-use doc_read::info_extract::read_head;
-use std::ffi::OsStr;
-use std::fs;
-use std::fs::File;
-use std::io::BufRead;
-use std::io::BufReader;
-use std::path::Path;
-use std::path::PathBuf;
-use tracing::Level;
-use tracing::metadata::LevelFilter;
-use tracing_subscriber::Layer;
-use tracing_subscriber::fmt;
+use doc_read::{
+    UnloadedDoc, XmlDoc,
+    info_extract::{read_body_info, read_head},
+};
+use std::{
+    ffi::OsStr,
+    fs::{self, File},
+    io::{BufRead, BufReader},
+    path::{Path, PathBuf},
+};
+use tracing::{Level, debug, error, info, metadata::LevelFilter};
+use tracing_subscriber::{Layer, fmt};
 
-use anyhow::Result;
-use anyhow::bail;
+use anyhow::{Result, bail};
 use clap::Parser;
 use csv::WriterBuilder;
 
 use doc_read::info_extract::ExtractedInfo;
-use tracing::debug;
-use tracing::error;
-use tracing::info;
-use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{
+    fmt::format::FmtSpan, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt,
+};
 use walkdir::WalkDir;
 
 #[derive(clap::Parser)]
