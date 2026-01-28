@@ -157,21 +157,34 @@ pub struct DocBlocks(Vec<Block>);
 
 impl DocBlocks {
     pub fn find_table_containing_one_of(&self, text: &[&str]) -> Option<&Block> {
-        let Some(opt) = self
-            .0
-            .iter()
-            .inspect(|x| {
-                dbg!(x);
-            })
-            .find(|x| match x {
-                Block::Paragraph(_) => false,
-                Block::Table(t) => t.iter().any(|x| text.contains(&x.trim())),
-            })
-        else {
+        let Some(opt) = self.0.iter().find(|x| match x {
+            Block::Paragraph(_) => false,
+            Block::Table(t) => t.iter().any(|x| text.contains(&x.trim())),
+        }) else {
             unreachable!("Doc should have the header table");
         };
         Some(opt)
     }
+
+    /// Tries case insensitive, without whitespace and adds some common characters
+    pub fn deep_find_table_containing_one_of(&self, text: &[&str]) -> Option<&Block> {
+        self.0.iter().find(|x| match x {
+            Block::Paragraph(_) => false,
+            Block::Table(t) => t.iter().any(|x| {
+                let trimmed_upper_text = x.trim().to_uppercase();
+
+                text.contains(&trimmed_upper_text.as_str())
+                    || text.contains(
+                        &trimmed_upper_text
+                            .split_whitespace()
+                            .collect::<String>()
+                            .as_str(),
+                    )
+                    || text.contains(&trimmed_upper_text.split(':').collect::<String>().as_str())
+            }),
+        })
+    }
+
     pub fn find_term_table_text(&self, term: &str) -> Option<&Block> {
         let Some(position) = self.0.iter().position(|x| {
             if !x.is_paragraph() {
@@ -181,19 +194,15 @@ impl DocBlocks {
                 unreachable!()
             };
             p.trim() == term
-
-            // match x {
-            //     Block::Paragraph(p) => p.trim() == term,
-            //     Block::Table(t) => t.iter().any(|x| x.trim() == term),
-            // }
         }) else {
-            warn!("Running case insensitive search for: {term}");
-            return self.find_term_table_text_case_insensitive(term);
+            warn!("Running deep search for: {term}");
+            return self.deep_find_term_table(term);
         };
         self.0.get(position + 1)
     }
 
-    pub fn find_term_table_text_case_insensitive(&self, term: &str) -> Option<&Block> {
+    /// Tries case insensitive, without whitespace and adds some common characters
+    pub fn deep_find_term_table(&self, term: &str) -> Option<&Block> {
         let Some(position) = self.0.iter().position(|x| {
             if !x.is_paragraph() {
                 return false;
@@ -201,14 +210,11 @@ impl DocBlocks {
             let Block::Paragraph(p) = x else {
                 unreachable!()
             };
-            p.trim().to_lowercase() == term.to_lowercase()
-            // match x {
-            //     Block::Paragraph(p) => p.to_lowercase() == term.to_lowercase(),
-            //     Block::Table(t) => t
-            //         .iter()
-            //         .map(|x| x.to_lowercase())
-            //         .any(|x| x == term.to_lowercase()),
-            // }
+            let lower_term = term.to_lowercase();
+            let trimmed_lower_text = p.trim().to_lowercase();
+            trimmed_lower_text == lower_term
+                || trimmed_lower_text.split_whitespace().collect::<String>() == lower_term
+                || trimmed_lower_text.split(':').collect::<String>() == term
         }) else {
             unreachable!("Should have the term: {term}");
         };

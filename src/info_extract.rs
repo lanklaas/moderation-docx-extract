@@ -18,14 +18,10 @@ pub struct ExtractedInfo {
 
 const HEADER_WORDS: &[&str] = &[
     "PROVINCE",
-    "PROVINCE:",
     "DISTRICT",
     "DISTRICT/REGION",
-    "DISTRICT:",
     "SCHOOL",
-    "SCHOOL:",
     "SUBJECT",
-    "SUBJECT:",
 ];
 
 pub fn read_head(blocks: &DocBlocks) -> HashMap<&'static str, String> {
