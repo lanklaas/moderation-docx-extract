@@ -12,6 +12,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use tracing::Level;
 use tracing::metadata::LevelFilter;
+use tracing::trace;
 use tracing_subscriber::Layer;
 use tracing_subscriber::fmt;
 
@@ -19,11 +20,8 @@ use anyhow::Result;
 use anyhow::bail;
 use clap::Parser;
 use csv::WriterBuilder;
-use doc_read::read_header_info;
 
 use doc_read::info_extract::ExtractedInfo;
-use doc_read::read_to_info_table;
-use quick_xml::Reader;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -92,7 +90,10 @@ fn main() -> anyhow::Result<()> {
         let mut ldoc = doc.from_path(file_path.clone())?.read_docx()?;
         info!("Processing file: {file_path:?}");
         match extract_one(&mut ldoc) {
-            Ok(extracted) => wtr.write_record(extracted.into_record(ldoc.file()))?,
+            Ok(extracted) => {
+                debug!("{extracted:?} <- extracted");
+                wtr.write_record(extracted.into_record(ldoc.file()))?
+            }
             Err(e) => {
                 error!("{e:?} in file: {file_path:?}");
             }
@@ -104,8 +105,7 @@ fn main() -> anyhow::Result<()> {
 
 fn extract_one(doc: &mut XmlDoc) -> Result<ExtractedInfo> {
     let blocks = doc.extract_doc_blocks()?;
-    let info = read_head(&blocks);
-    dbg!(&info);
+    let info = read_head(&blocks)?;
     // read_to_text_starting_with(TEXT_STARTING_WITH, &mut buf, &mut reader)?;
     debug!("Reading areas_that_require_intervention_and_support");
     let body = read_body_info(&blocks)?;

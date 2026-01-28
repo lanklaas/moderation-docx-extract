@@ -5,6 +5,7 @@ use docx_rs::{
     TableRowChild, read_docx,
 };
 use docx_rs::{Docx, Table};
+use info_extract::Term;
 use state::{IsXml, Loaded, NotLoaded};
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -17,7 +18,7 @@ use derive_builder::Builder;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use serde::Serialize;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, trace};
 
 pub type UnloadedDoc = DocBytes<NotLoaded>;
 pub type LoadedDoc = DocBytes<Loaded>;
@@ -161,7 +162,8 @@ impl DocBlocks {
             Block::Paragraph(_) => false,
             Block::Table(t) => t.iter().any(|x| text.contains(&x.trim())),
         }) else {
-            unreachable!("Doc should have the header table");
+            info!("Running deep search for table terms");
+            return self.deep_find_table_containing_one_of(text);
         };
         Some(opt)
     }
@@ -171,21 +173,23 @@ impl DocBlocks {
         self.0.iter().find(|x| match x {
             Block::Paragraph(_) => false,
             Block::Table(t) => t.iter().any(|x| {
-                let trimmed_upper_text = x.trim().to_uppercase();
+                let trimmed_upper_text_whitespace_removed = x.split_whitespace().collect::<String>().to_uppercase();
 
-                text.contains(&trimmed_upper_text.as_str())
+                text.contains(&trimmed_upper_text_whitespace_removed.as_str())
                     || text.contains(
-                        &trimmed_upper_text
+                        &trimmed_upper_text_whitespace_removed
                             .split_whitespace()
                             .collect::<String>()
                             .as_str(),
                     )
-                    || text.contains(&trimmed_upper_text.split(':').collect::<String>().as_str())
+                    || text.contains(&trimmed_upper_text_whitespace_removed.split(':').collect::<String>().as_str())
+                    // Some docs has DISTRICT/REGOIN instead of just DISTRICT
+                    || text.contains(&format!("{trimmed_upper_text_whitespace_removed}/REGION").as_str())
             }),
         })
     }
 
-    pub fn find_term_table_text(&self, term: &str) -> Option<&Block> {
+    pub fn find_term_table_text(&self, term: &Term) -> Option<&Block> {
         let Some(position) = self.0.iter().position(|x| {
             if !x.is_paragraph() {
                 return false;
@@ -193,32 +197,52 @@ impl DocBlocks {
             let Block::Paragraph(p) = x else {
                 unreachable!()
             };
-            p.trim() == term
+            term == p.trim()
         }) else {
-            warn!("Running deep search for: {term}");
+            info!("Running deep search for: {term}");
             return self.deep_find_term_table(term);
         };
+
         self.0.get(position + 1)
     }
 
     /// Tries case insensitive, without whitespace and adds some common characters
-    pub fn deep_find_term_table(&self, term: &str) -> Option<&Block> {
+    pub fn deep_find_term_table(&self, term: &Term) -> Option<&Block> {
         let Some(position) = self.0.iter().position(|x| {
-            if !x.is_paragraph() {
-                return false;
+            // if !x.is_paragraph() {
+            //     return false;
+            // }
+            // let Block::Paragraph(p) = x else {
+            //     unreachable!()
+            // };
+            match x {
+                Block::Paragraph(p) => term.deep_matches(p),
+                Block::Table(t) => {
+                    for word in t {
+                        trace!("Looking for {term} in {word}");
+                        if term.deep_matches(word) {
+                            return true;
+                        }
+                    }
+                    false
+                }
             }
-            let Block::Paragraph(p) = x else {
-                unreachable!()
-            };
-            let lower_term = term.to_lowercase();
-            let trimmed_lower_text = p.trim().to_lowercase();
-            trimmed_lower_text == lower_term
-                || trimmed_lower_text.split_whitespace().collect::<String>() == lower_term
-                || trimmed_lower_text.split(':').collect::<String>() == term
         }) else {
-            unreachable!("Should have the term: {term}");
+            debug!("Term: {term} was not found in doc.");
+            return None;
         };
-        self.0.get(position + 1)
+
+        match self.0.get(position) {
+            Some(thing) => {
+                // If the search text was in a table (Like in the left column, return the table instead of the next table)
+                if !thing.is_paragraph() {
+                    return Some(thing);
+                }
+
+                self.0.get(position + 1)
+            }
+            _ => self.0.get(position + 1),
+        }
     }
 }
 
