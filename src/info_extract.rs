@@ -8,9 +8,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use anyhow::bail;
-use derive_builder::Builder;
 
-use serde::Serialize;
 use tracing::trace;
 
 #[derive(Debug)]
@@ -146,15 +144,6 @@ impl ExtractedInfo {
         ret.push("File");
         ret
     }
-}
-
-#[derive(Builder, Debug, Serialize)]
-#[builder_struct_attr(derive(Debug))]
-pub struct ExtractInfo {
-    pub identification_of_irregularities: Option<String>,
-    pub areas_that_require_intervention_and_support: String,
-    pub recommendations: String,
-    pub areas_of_good_practice_innovation: Option<String>,
 }
 
 const TERM_LEN: usize = 5;

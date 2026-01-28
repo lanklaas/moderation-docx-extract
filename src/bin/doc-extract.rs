@@ -7,12 +7,10 @@ use std::fs;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
-use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 use tracing::Level;
 use tracing::metadata::LevelFilter;
-use tracing::trace;
 use tracing_subscriber::Layer;
 use tracing_subscriber::fmt;
 
@@ -29,7 +27,6 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use walkdir::WalkDir;
-use zip::ZipArchive;
 
 #[derive(clap::Parser)]
 #[clap(about = "Extracts data from word files in a directory")]
@@ -111,33 +108,6 @@ fn extract_one(doc: &mut XmlDoc) -> Result<ExtractedInfo> {
     let body = read_body_info(&blocks)?;
 
     Ok(ExtractedInfo { header: info, body })
-}
-
-fn collect_doc_xmls(dir_with_files: &Path) -> anyhow::Result<Vec<(Vec<u8>, PathBuf)>> {
-    let mut ret = vec![];
-    for f in WalkDir::new(dir_with_files)
-        .into_iter()
-        .filter_map(|x| x.ok())
-        .filter(|x| x.path().extension() == Some(OsStr::new("docx")))
-    {
-        let mut zip = ZipArchive::new(File::open(f.path())?)?;
-        debug!(
-            "Zip files in {f:?}: {:?}",
-            zip.file_names().collect::<Vec<_>>()
-        );
-        let mut file = zip.by_name("word/document.xml")?;
-
-        let mut buf = Vec::with_capacity(file.size().try_into().unwrap());
-        file.read_to_end(&mut buf)?;
-        ret.push((buf, f.path().to_path_buf()));
-    }
-    if ret.is_empty() {
-        bail!(
-            "No docx files found in {:?}",
-            fs::canonicalize(dir_with_files)
-        );
-    }
-    Ok(ret)
 }
 
 fn collect_docs(dir_with_files: &Path) -> anyhow::Result<Vec<PathBuf>> {
