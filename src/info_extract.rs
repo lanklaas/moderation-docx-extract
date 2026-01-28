@@ -1,118 +1,50 @@
-use crate::Block;
-use crate::DocBlocks;
-use std::collections::HashMap;
+use crate::DocTables;
 use std::fmt::Debug;
 use std::fmt::Display;
-use std::mem;
 use std::path::Path;
 
 use anyhow::Result;
-use anyhow::bail;
 
 use tracing::trace;
 
 #[derive(Debug)]
 pub struct ExtractedInfo {
-    pub header: HashMap<&'static str, String>,
-    pub body: HashMap<&'static str, String>,
+    pub header: Vec<String>,
+    pub body: Vec<String>,
 }
 
-const HEADER_WORDS: &[&str] = &["PROVINCE", "DISTRICT", "SCHOOL", "SUBJECT"];
+const HEADER_WORDS: &[&str] = &["PROVINCE", "DISTRICT", "SUBJECT"];
 
-pub fn read_head(blocks: &DocBlocks) -> Result<HashMap<&'static str, String>> {
-    let Some(Block::Table(t)) = blocks.find_table_containing_one_of(HEADER_WORDS) else {
-        bail!("This doc does not have any of the header terms.");
-    };
-    let mut t = t.clone();
-
-    // Normalize to district
-    t.iter_mut()
-        .filter(|x| *x == "DISTRICT/REGION")
-        .for_each(|x| {
-            *x = "DISTRICT".to_string();
-        });
-
-    // Normalize extra chars
-    t.iter_mut()
-        .filter(|x| {
-            let fixed = x
-                .split_whitespace()
-                .collect::<String>()
-                .to_uppercase()
-                .split(':')
-                .collect::<String>();
-            HEADER_WORDS.contains(&fixed.as_str())
-        })
-        .for_each(|x| {
-            *x = x
-                .split_whitespace()
-                .collect::<String>()
-                .to_uppercase()
-                .split(':')
-                .collect::<String>()
-        });
-
-    let mut ret = HashMap::new();
-
-    for word in HEADER_WORDS {
-        let Some(pos) = t.iter().position(|x| x == word) else {
-            ret.insert(*word, "".to_string());
+pub fn read_head(tables: &DocTables) -> Result<Vec<String>> {
+    let mut ret = Vec::new();
+    for term in HEADER_WORDS {
+        let Some(description) = tables.find_heading_description(term) else {
+            ret.push("".to_string());
             continue;
         };
-        let val = t
-            .get_mut(pos + 1)
-            .expect("Next text to be the value of the word");
-        let val = mem::take(val);
-        ret.insert(*word, val);
+
+        ret.push(description.to_string());
     }
 
-    if ret.len() < 4 {
-        for word in HEADER_WORDS {
-            if ret.contains_key(word) {
-                continue;
-            }
-            ret.insert(*word, String::new());
-        }
-    }
+    let Some(skewls) = tables.find_schools() else {
+        ret.push("".to_string());
+        return Ok(ret);
+    };
+
+    ret.push(skewls);
+
     Ok(ret)
 }
 
-pub fn read_body_info(blocks: &DocBlocks) -> Result<HashMap<&'static str, String>> {
-    let mut ret = HashMap::new();
+pub fn read_body_info(tables: &DocTables) -> Result<Vec<String>> {
+    let mut ret = Vec::new();
     for term in EXTRACT_SEARCH_TERMS_IN_ORDER {
-        match blocks.find_term_table_text(&term) {
-            Some(Block::Table(t)) => {
-                // Several sections might be in the table, so I need to scan again and slice it up.
-                // This will not be very performant, but should do for the small amount of times
-                // I have to run this app
-                let Some(pos) = t.iter().position(|x| term.deep_matches(x)) else {
-                    ret.insert(term.into_main(), t.join(""));
-                    continue;
-                };
-                let mut first_term_after_me = None;
-                for (i, word) in t.iter().enumerate().skip(pos) {
-                    for term in EXTRACT_SEARCH_TERMS_IN_ORDER.iter().filter(|x| **x != term) {
-                        if !term.deep_matches(word) {
-                            continue;
-                        }
-                        first_term_after_me = Some(i);
-                    }
-                }
+        let Some(description) = tables.find_info_descriptions(&term) else {
+            ret.push("".to_string());
+            continue;
+        };
 
-                if let Some(next_term_pos) = first_term_after_me {
-                    ret.insert(term.into_main(), t[pos + 1..next_term_pos].join("\n"));
-                } else {
-                    ret.insert(term.into_main(), t[pos..].join("\n"));
-                }
-            }
-            Some(Block::Paragraph(p)) => {
-                ret.insert(term.into_main(), p.to_string());
-            }
-            None => {
-                ret.insert(term.into_main(), "".to_string());
-                continue;
-            }
-        }
+        ret.push(description.to_string());
     }
 
     Ok(ret)
@@ -123,24 +55,20 @@ impl ExtractedInfo {
         let Self { header, body } = self;
 
         let mut ret = vec![];
-        ret.extend(header.into_values());
-        ret.extend(body.into_values());
+
+        ret.extend(header);
+        ret.extend(body);
         ret.push(file.to_str().unwrap_or_default().to_string());
 
         ret
     }
 
     pub fn header_record() -> Vec<&'static str> {
-        let mut ret = vec![
-            "Province", "District", "School",
-            "Subject",
-            // "Areas That Require Intervention And Support",
-            // "Recommendations For Improvement",
-            // "File",
-        ];
-        for term in EXTRACT_SEARCH_TERMS_IN_ORDER.iter().take(TERM_LEN) {
+        let mut ret = vec!["Province", "District", "Subject", "Schools"];
+        for term in EXTRACT_SEARCH_TERMS_IN_ORDER {
             ret.push(term.into_main());
         }
+
         ret.push("File");
         ret
     }

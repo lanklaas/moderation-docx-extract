@@ -94,11 +94,11 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn extract_one(doc: &mut XmlDoc) -> Result<ExtractedInfo> {
-    let blocks = doc.extract_doc_blocks()?;
-    let info = read_head(&blocks)?;
+    let tables = doc.extract_doc_tables()?;
+    let info = read_head(&tables)?;
     // read_to_text_starting_with(TEXT_STARTING_WITH, &mut buf, &mut reader)?;
     debug!("Reading areas_that_require_intervention_and_support");
-    let body = read_body_info(&blocks)?;
+    let body = read_body_info(&tables)?;
 
     Ok(ExtractedInfo { header: info, body })
 }
