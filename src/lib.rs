@@ -1,434 +1,292 @@
-use std::path::PathBuf;
+pub mod info_extract;
 
-use anyhow::{bail, Result};
-use derive_builder::Builder;
-use quick_xml::events::{BytesStart, Event};
-use quick_xml::Reader;
-use serde::Serialize;
-use tracing::{debug, info, trace};
-
-use docx_rust::document::{
-    Paragraph, ParagraphContent, RunContent, TableCell, TableCellContent, TableRowContent,
+use docx_rs::{
+    DocumentChild, Paragraph, ParagraphChild, RunChild, TableCellContent, TableChild,
+    TableRowChild, read_docx,
 };
-use docx_rust::{document::BodyContent, Docx};
+use docx_rs::{Docx, Table};
+use info_extract::Term;
+use state::{IsXml, Loaded, NotLoaded};
+use std::borrow::Cow;
+use std::fs::File;
+use std::io::{BufReader, Read};
+use std::ops::{Deref, DerefMut};
+use std::path::{Path, PathBuf};
 
-pub fn extract_first_table_first_row(docx: &Docx) {
-    // let mut table_counter = 0;
-    // Iterate through all blocks in the document
-    for block in &docx.document.body.content {
-        match block {
-            BodyContent::Table(table) => {
-                // table_counter += 1;
-                // Found the first table
-                for row in &table.rows {
-                    // Extract text from each cell in the first row
-                    let row_text: Vec<String> = row
-                        .cells
-                        .iter()
-                        .filter(|x| matches!(x, TableRowContent::TableCell(_)))
-                        .map(|x| {
-                            let TableRowContent::TableCell(c) = x else {
-                                unreachable!("filter")
-                            };
-                            c
-                        })
-                        .map(|cell| {
-                            // cell.content.iter().find(|x| matches!(x, TableCellContent::))
-                            // let TableRowContent::TableCell(c) = cell else {
-                            //     unreachable!("filter")
-                            // };
+use anyhow::Result;
 
-                            extract_text_from_cell(cell)
-                        })
-                        .collect();
+use tracing::{debug, trace};
 
-                    println!("Row Data: {:?}", row_text);
-                }
-                // if table_counter == 2 {
-                //     break; // Since we only need the first table
-                // }
-            }
-            BodyContent::Sdt(s) => {
-                panic!("{s:?}")
-            }
-            BodyContent::Paragraph(p) => {
-                trace!("body para: {p:?}")
-            }
-            other => todo!("{other:?}"),
+pub type UnloadedDoc = DocBytes<NotLoaded>;
+pub type LoadedDoc = DocBytes<Loaded>;
+pub type XmlDoc = DocBytes<IsXml>;
+
+#[derive(Debug)]
+pub struct DocBytes<S> {
+    buf: Vec<u8>,
+    path: PathBuf,
+    _state: S,
+}
+
+impl Default for UnloadedDoc {
+    fn default() -> Self {
+        Self {
+            buf: vec![],
+            path: PathBuf::new(),
+            _state: NotLoaded,
         }
     }
 }
 
-// Helper function to extract text from a table cell
-pub fn extract_text_from_cell(cell: &TableCell) -> String {
-    cell.content
-        .iter()
-        .map(|block| {
-            let TableCellContent::Paragraph(paragraph) = block;
-            paragraph.text()
-        })
-        .collect::<Vec<String>>()
-        .join(",")
+pub mod state {
+    use docx_rs::Docx;
+
+    pub struct NotLoaded;
+    pub struct Loaded;
+    pub struct IsXml {
+        pub(super) xml_doc: Docx,
+    }
 }
-// Helper function to convert a paragraph to text
-pub fn paragraph_to_text(paragraph: &Paragraph) -> String {
-    paragraph
-        .content
-        .iter()
-        // .filter(|x| matches!(x, ParagraphContent::Run(_)))
-        .map(|run| {
-            let ParagraphContent::Run(r) = run else {
-                unreachable!("filter")
-            };
-            r.content
+
+impl UnloadedDoc {
+    pub fn from_path(self, path: PathBuf) -> Result<LoadedDoc> {
+        let Self { mut buf, .. } = self;
+        let mut rd = BufReader::new(File::open(&path)?);
+        rd.read_to_end(&mut buf)?;
+        Ok(LoadedDoc {
+            buf,
+            path,
+            _state: Loaded,
+        })
+    }
+}
+
+impl LoadedDoc {
+    pub fn read_docx(self) -> Result<XmlDoc> {
+        let Self { buf, path, .. } = self;
+        let doc = read_docx(&buf)?;
+        Ok(DocBytes {
+            buf,
+            path,
+            _state: IsXml { xml_doc: doc },
+        })
+    }
+}
+
+impl XmlDoc {
+    pub fn file(&self) -> &Path {
+        self.path.as_path()
+    }
+    pub fn unload(self) -> UnloadedDoc {
+        let Self { mut buf, .. } = self;
+        buf.clear();
+        DocBytes {
+            buf,
+            path: PathBuf::new(),
+            _state: NotLoaded,
+        }
+    }
+    pub fn extract_doc_tables(&mut self) -> Result<DocTables> {
+        let mut ret = Vec::new();
+
+        // Take the children so we can own them (and not reverse them)
+        let children = std::mem::take(&mut self.document.children);
+
+        let mut heading = None;
+        for (i, child) in children.clone().into_iter().enumerate() {
+            let next = children.get(i + 1);
+            let nextnext = children.get(i + 2);
+            match child {
+                DocumentChild::Paragraph(p) => {
+                    let text = extract_paragraph_text(*p);
+                    match (next, nextnext) {
+                        (Some(DocumentChild::Table(t)), _) if !text.trim().is_empty() => {
+                            heading = Some(text);
+                        }
+                        (_, Some(DocumentChild::Table(t))) if !text.trim().is_empty() => {
+                            heading = Some(text);
+                        }
+
+                        other => {
+                            trace!("{other:?} -> other element found.");
+                        }
+                    }
+                }
+                DocumentChild::Table(t) => {
+                    let rows = collect_tables(*t);
+                    let heading = heading.take();
+                    ret.push(DocTable { heading, rows })
+                }
+                other => {
+                    debug!("Unhandled document child: {other:?}");
+                }
+            }
+        }
+
+        Ok(DocTables(ret))
+    }
+}
+
+impl Deref for XmlDoc {
+    type Target = Docx;
+    fn deref(&self) -> &Self::Target {
+        &self._state.xml_doc
+    }
+}
+
+impl DerefMut for XmlDoc {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self._state.xml_doc
+    }
+}
+
+#[derive(Debug)]
+pub struct DocTable {
+    heading: Option<String>,
+    rows: Vec<[String; 2]>,
+}
+
+#[derive(Debug)]
+pub struct DocTables(Vec<DocTable>);
+
+impl DocTables {
+    pub fn find_heading_description(&self, heading: &str) -> Option<Cow<'_, str>> {
+        for table in &self.0 {
+            for row in &table.rows {
+                let [col1, col2] = row;
+
+                if col1 == heading {
+                    return Some(col2.into());
+                }
+
+                let col1_deep = col1
+                    .split_whitespace()
+                    .flat_map(|x| x.chars().filter(|x| *x != ':'))
+                    .collect::<String>()
+                    .to_uppercase();
+
+                if col1_deep == heading.to_uppercase() {
+                    return Some(col2.into());
+                }
+            }
+        }
+        None
+    }
+
+    pub fn find_schools(&self) -> Option<String> {
+        for table in &self.0 {
+            let Some(pos) = table
+                .rows
                 .iter()
-                // .get(0)
-                .find(|x| matches!(x, RunContent::Text(_)))
-                .map(|x| {
-                    let RunContent::Text(t) = x else {
-                        unreachable!("filter")
-                    };
-                    t.text.to_string()
-                })
-                .unwrap_or_default()
-        })
-        .collect::<Vec<String>>()
-        .join("")
+                .position(|[.., col2]| col2 == "List of Moderated Schools")
+            else {
+                continue;
+            };
+
+            return Some(
+                table.rows[pos + 1..]
+                    .iter()
+                    .map(|[.., col2]| col2.to_string())
+                    .collect::<Vec<String>>()
+                    .join(", "),
+            );
+        }
+        None
+    }
+
+    pub fn find_info_descriptions(&self, info_term: &Term) -> Option<String> {
+        for DocTable { heading, rows } in self.0.iter().filter(|x| x.heading.is_some()) {
+            let heading = heading.as_ref().expect("filter");
+
+            if *info_term == **heading || info_term.deep_matches(heading) {
+                return Some(
+                    rows.iter()
+                        .map(|x| {
+                            x.iter()
+                                .filter(|x| !x.is_empty())
+                                .map(ToString::to_string)
+                                .collect::<String>()
+                        })
+                        .collect::<Vec<String>>()
+                        .join("\n"),
+                );
+            }
+        }
+        None
+    }
 }
 
-pub fn get_body<'a>(buf: &'a mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<BytesStart<'a>> {
-    loop {
-        let event = reader.read_event_into(buf)?;
-        match event {
-            Event::Start(element) => {
-                dbg!(std::str::from_utf8(element.name().as_ref())?);
-                match element.name().as_ref() {
-                    b"w:body" => {
-                        return Ok(element.to_owned());
+fn collect_tables(table: Table) -> Vec<[String; 2]> {
+    let mut ret = vec![];
+    for row in table.rows {
+        let TableChild::TableRow(row) = row;
+
+        let mut col1 = "".to_string();
+        let mut col2 = "".to_string();
+        for (i, cell) in row.cells.into_iter().enumerate() {
+            let TableRowChild::TableCell(c) = cell;
+
+            for cell_child in c.children {
+                match cell_child {
+                    TableCellContent::Paragraph(p) => match i {
+                        0 => col1 = extract_paragraph_text(p),
+                        1 => col2 = extract_paragraph_text(p),
+                        other => {
+                            debug!(
+                                "Ignoring column {other}: {}. Only 2 columns are supported",
+                                extract_paragraph_text(p)
+                            )
+                        }
+                    },
+                    TableCellContent::Table(_) => {
+                        debug!("Doc has nested tables, not extracting the nested table");
                     }
-                    el => {
-                        trace!("get_body not body: {el:?}");
+                    other => debug!("Unhandled collect_table_paragraphs: {other:?}"),
+                }
+            }
+        }
+
+        if col1.is_empty() && col2.is_empty() {
+            continue;
+        }
+        ret.push([col1, col2]);
+    }
+    ret
+}
+
+pub fn extract_paragraph_text(p: Paragraph) -> String {
+    let mut ret = vec![];
+    for par in p.children {
+        match par {
+            ParagraphChild::Run(r) => {
+                for run in r.children {
+                    match run {
+                        RunChild::Text(t) => {
+                            ret.push(t.text);
+                        }
+                        other => debug!("Unhandled run found: {other:?}"),
                     }
                 }
             }
-            Event::Decl(d) => {
-                debug!("get body Decl: {d:?}");
-            }
-            other => {
-                todo!("{other:?}")
-            }
+            other => debug!("Unhandled element found: {other:?}"),
         }
     }
+    ret.join("")
 }
 
-pub fn get_first_table<'a>(reader: &mut Reader<&[u8]>) -> Result<BytesStart<'a>> {
-    let mut buf = vec![];
-    loop {
-        let event = reader.read_event_into(&mut buf)?;
-        match event {
-            Event::Start(element) if element.name().as_ref() == b"w:tbl" => {
-                return Ok(element.to_owned())
-            }
-            Event::Eof => {
-                unreachable!("Should have got a table before the end")
-            }
-            other => {
-                debug!("get_first_table: {other:?}")
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    #[test_log::test]
+    fn test_table_extract() -> Result<()> {
+        let doc = UnloadedDoc::default();
+        let mut ldoc = doc.from_path("data/14. Final SBA REPORTS to Head of Departments/PHYSICAL SCIENCES/PHASE 2/DISTRICT REPORTS/PHYSICAL SCIENCES - WC -WEST COAST- 2025 DBE SBA PHASE 2 REPORT Verified 04.11.25.docx".into())?.read_docx()?;
+        let tables = ldoc.extract_doc_tables()?;
+        dbg!(tables.find_heading_description("PROVINCE").unwrap());
+        // dbg!(tables);
+        Ok(())
     }
-}
-
-pub fn get_table_row<'a>(reader: &mut Reader<&[u8]>) -> Result<BytesStart<'a>> {
-    let mut buf = vec![];
-    loop {
-        let event = reader.read_event_into(&mut buf)?;
-        match event {
-            Event::Start(element) if element.name().as_ref() == b"w:tr" => {
-                return Ok(element.to_owned())
-            }
-            Event::Eof => {
-                unreachable!("Should have got a table before the end")
-            }
-            other => {
-                debug!("get_table_row: {other:?}")
-            }
-        }
-    }
-}
-
-pub fn get_element<'a>(
-    name: &[u8],
-    buf: &'a mut Vec<u8>,
-    reader: &mut Reader<&[u8]>,
-) -> Result<BytesStart<'a>> {
-    trace!("Looking for element: {:?}", std::str::from_utf8(name));
-    loop {
-        let event = reader.read_event_into(buf)?;
-        match event {
-            Event::Start(element) if element.name().as_ref() == name => {
-                return Ok(element.to_owned())
-            }
-            Event::Eof => {
-                bail!(
-                    "get_element failed looking for {:?} Should have got a table before the end",
-                    std::str::from_utf8(name)
-                )
-            }
-            other => {
-                trace!("get_element: {other:?}")
-            }
-        }
-    }
-}
-
-pub fn read_to_info_table(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<()> {
-    get_body(buf, reader).unwrap();
-    get_element(b"w:tbl", buf, reader)?;
-    get_element(b"w:tbl", buf, reader)?;
-
-    Ok(())
-}
-
-/// Read the text of the first cell in the row
-pub fn read_row_first_cell_text(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<String> {
-    get_element(b"w:tr", buf, reader)?;
-    read_cell_text(buf, reader)
-    // get_element(b"w:tc", buf, reader)?;
-    // get_element(b"w:p", buf, reader)?;
-    // get_element(b"w:r", buf, reader)?;
-    // get_element(b"w:t", buf, reader).unwrap();
-
-    // let mut tbuf = vec![];
-    // let evt = reader.read_event_into(&mut tbuf).unwrap();
-    // let Event::Text(t) = evt else { unreachable!() };
-
-    // Ok(String::from_utf8(t.to_vec())?)
-}
-
-pub fn read_run_text(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<String> {
-    let mut ret = String::new();
-    // for _ in 0..2 {
-    get_element(b"w:r", buf, reader)?;
-    get_element(b"w:t", buf, reader)?;
-
-    let mut tbuf = vec![];
-    let evt = reader.read_event_into(&mut tbuf).unwrap();
-    match evt {
-        Event::Text(t) => {
-            let t = std::str::from_utf8(&t)?;
-            ret.push_str(t);
-        }
-        Event::End(_) => {
-            info!("End of w:t, must be empty");
-        }
-        other => unreachable!("{other:?}"),
-    }
-    // }
-    Ok(ret)
-}
-
-pub fn read_cell_text(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<String> {
-    get_element(b"w:tc", buf, reader)?;
-    get_element(b"w:p", buf, reader)?;
-    read_run_text(buf, reader)
-}
-
-#[derive(Builder, Debug, Serialize)]
-#[builder_struct_attr(derive(Debug))]
-pub struct HeaderInfo {
-    pub province: String,
-    pub district: String,
-    pub school: String,
-    pub subject: Option<String>,
-}
-
-pub fn read_header_info(buf: &mut Vec<u8>, reader: &mut Reader<&[u8]>) -> Result<HeaderInfo> {
-    let mut results = HeaderInfoBuilder::create_empty();
-    let mut protection_counter = 0;
-    loop {
-        protection_counter += 1;
-        let t = read_row_first_cell_text(buf, reader).unwrap();
-        match t.as_str() {
-            "Province" => {
-                let prov = read_cell_text(buf, reader)?;
-                results.province(prov);
-            }
-            "District" | "District/Region" => {
-                let dis = read_cell_text(buf, reader)?;
-                results.district(dis);
-            }
-            "School" => {
-                let sc = read_cell_text(buf, reader)?;
-                results.school(sc);
-            }
-            "Subject" => {
-                let sub = read_cell_text(buf, reader)?;
-                results.subject(Some(sub));
-            }
-            other => debug!("{other} text found"),
-        }
-        if protection_counter > 5
-            && !(results.province.is_some()
-                && results.district.is_some()
-                && results.school.is_some())
-        {
-            bail!("HeaderInfo loop ran too long. Builder status: {results:?}");
-        }
-        if results.province.is_some()
-            && results.district.is_some()
-            && results.school.is_some()
-            && results.subject.is_none()
-            && protection_counter > 4
-        {
-            results.subject(None);
-        }
-        match results.build() {
-            Ok(res) => return Ok(res),
-            Err(e) => {
-                debug!("{e}. Build not complete.");
-            }
-        }
-    }
-}
-
-pub fn read_to_text_starting_with(
-    starts_with: &[u8],
-    buf: &mut Vec<u8>,
-    reader: &mut Reader<&[u8]>,
-) -> Result<()> {
-    loop {
-        get_element(b"w:t", buf, reader)?;
-        let mut tbuf = vec![];
-        let evt = reader.read_event_into(&mut tbuf)?;
-        let t = match evt {
-            Event::Text(t) => {
-                debug!(
-                    "Text {t:?} found, looking for {:?}",
-                    std::str::from_utf8(starts_with)
-                );
-                t
-            }
-            Event::End(e) => {
-                debug!(
-                    "{e:?}, End found before text: {:?}",
-                    std::str::from_utf8(starts_with)
-                );
-                continue;
-            }
-            other => unreachable!("{other:?}"),
-        };
-        if t.starts_with(starts_with) {
-            info!(
-                "Found {t:?} starts with {:?}",
-                std::str::from_utf8(starts_with)
-            );
-            break;
-        }
-    }
-    Ok(())
-}
-
-pub fn read_run_text_until(
-    stop_str: &str,
-    buf: &mut Vec<u8>,
-    reader: &mut Reader<&[u8]>,
-) -> Result<String> {
-    let mut res = vec![];
-    loop {
-        let s = read_run_text(buf, reader)?;
-        if s.contains(stop_str) {
-            break;
-        }
-        res.push(s);
-    }
-    Ok(res.join(""))
-}
-
-pub fn read_part_four(
-    start_section_text: &[u8],
-    next_section_text: &str,
-    buf: &mut Vec<u8>,
-    reader: &mut Reader<&[u8]>,
-) -> Result<String> {
-    read_to_text_starting_with(start_section_text, buf, reader)?;
-    get_element(b"w:tbl", buf, reader)?;
-    get_element(b"w:tr", buf, reader)?;
-    read_run_text_until(next_section_text, buf, reader)
-}
-
-/// If the previous call was read_part_four then the reader position is alredy in the correct place
-pub fn read_part_four_no_search(
-    next_section_text: &str,
-    buf: &mut Vec<u8>,
-    reader: &mut Reader<&[u8]>,
-) -> Result<String> {
-    get_element(b"w:tbl", buf, reader)?;
-    get_element(b"w:tr", buf, reader)?;
-    read_run_text_until(next_section_text, buf, reader)
-}
-
-#[derive(Debug, Serialize)]
-pub struct ExtractedInfo {
-    pub header: HeaderInfo,
-    pub part4: Part4,
-    pub file: PathBuf,
-}
-
-impl ExtractedInfo {
-    pub fn as_record(&self) -> [&str; 9] {
-        let Self {
-            header:
-                HeaderInfo {
-                    province,
-                    district,
-                    school,
-                    subject,
-                },
-            part4:
-                Part4 {
-                    areas_of_improvement,
-                    areas_of_non_compliance,
-                    directives_for_compliance,
-                    recommendations_for_improvement,
-                },
-            file,
-        } = self;
-        [
-            province,
-            district,
-            school,
-            subject
-                .as_ref()
-                .map(|x| x.as_str())
-                .unwrap_or("Subject not found"),
-            areas_of_improvement,
-            areas_of_non_compliance,
-            directives_for_compliance,
-            recommendations_for_improvement,
-            file.to_str().unwrap_or_default(),
-        ]
-    }
-
-    pub fn header_record() -> [&'static str; 9] {
-        [
-            "Province",
-            "District",
-            "School",
-            "Subject",
-            "Areas Of Improvement",
-            "Areas Of Non Compliance",
-            "Directives For Compliance",
-            "Recommendations For Improvement",
-            "File",
-        ]
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct Part4 {
-    pub areas_of_improvement: String,
-    pub areas_of_non_compliance: String,
-    pub directives_for_compliance: String,
-    pub recommendations_for_improvement: String,
 }
