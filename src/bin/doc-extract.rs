@@ -1,7 +1,4 @@
-use doc_read::{
-    UnloadedDoc, XmlDoc,
-    info_extract::{read_body_info, read_head},
-};
+use doc_read::{UnloadedDoc, XmlDoc};
 use std::{
     ffi::OsStr,
     fs::{self, File},
@@ -15,7 +12,7 @@ use anyhow::{Result, bail};
 use clap::Parser;
 use csv::WriterBuilder;
 
-use doc_read::info_extract::ExtractedInfo;
+use doc_read::extraction::ExtractedInfo;
 use tracing_subscriber::{
     fmt::format::FmtSpan, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt,
 };
@@ -33,6 +30,12 @@ struct Args {
         help = "The data_dir path is a file with a list of paths to process"
     )]
     input_is_list_file: bool,
+    // #[clap(
+    //     short = 't',
+    //     help = "The type of documents passed into the program",
+    //     value_enum
+    // )]
+    // extract_type: DocType,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -55,6 +58,8 @@ fn main() -> anyhow::Result<()> {
         data_dir,
         output_file,
         input_is_list_file,
+        ..
+        // extract_type,
     } = Args::parse();
 
     info!("Parsing docx files...");
@@ -95,12 +100,8 @@ fn main() -> anyhow::Result<()> {
 
 fn extract_one(doc: &mut XmlDoc) -> Result<ExtractedInfo> {
     let tables = doc.extract_doc_tables()?;
-    let info = read_head(&tables)?;
-    // read_to_text_starting_with(TEXT_STARTING_WITH, &mut buf, &mut reader)?;
-    debug!("Reading areas_that_require_intervention_and_support");
-    let body = read_body_info(&tables)?;
 
-    Ok(ExtractedInfo { header: info, body })
+    Ok(tables.try_into_extracted())
 }
 
 fn collect_docs(dir_with_files: &Path) -> anyhow::Result<Vec<PathBuf>> {
