@@ -24,25 +24,6 @@ pub enum DocType {
     Oral,
 }
 
-// impl DocType {
-//     pub fn read_head(&self, doc: &mut XmlDoc, tables: &DocTables) -> Result<Vec<String>> {
-//         match self {
-//             Self::Phase2District => phase2_extract::read_head(tables),
-//             Self::Oral => {
-//                 doc.extract_doc_tables()
-//                 // oral::read_head(tables)
-//             }
-//         }
-//     }
-
-//     pub fn read_body_info(&self, tables: &DocTables) -> Result<Vec<String>> {
-//         match self {
-//             Self::Phase2District => phase2_extract::read_body_info(tables),
-//             Self::Oral => todo!(),
-//         }
-//     }
-// }
-
 pub fn collect_tables(table: Table) -> Vec<[String; 2]> {
     let mut ret = vec![];
     for row in table.rows {
@@ -56,8 +37,8 @@ pub fn collect_tables(table: Table) -> Vec<[String; 2]> {
             for cell_child in c.children {
                 match cell_child {
                     TableCellContent::Paragraph(p) => match i {
-                        0 => col1 = extract_paragraph_text(p),
-                        1 => col2 = extract_paragraph_text(p),
+                        0 => col1 += &extract_paragraph_text(p),
+                        1 => col2 += &extract_paragraph_text(p),
                         other => {
                             debug!(
                                 "Ignoring column {other}: {}. Only 2 columns are supported",
